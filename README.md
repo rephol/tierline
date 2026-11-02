@@ -2,8 +2,9 @@
 
 [![CI](https://github.com/rephol/tierline/actions/workflows/ci.yml/badge.svg)](https://github.com/rephol/tierline/actions/workflows/ci.yml)
 
-> **Status: pre-alpha, design stage.** Nothing below has been measured yet. Every
-> number is a target, not a result, and is marked **TBD** until a benchmark run backs it.
+> **Status: pre-alpha.** One small pilot benchmark has been run (see [Metrics](#the-metrics-how-this-will-be-judged)).
+> Its numbers come from 20 attempts per arm on self-written tasks. Treat them as early
+> signal, not proof.
 
 A model-routing proxy for coding agents, written in Rust. Point Claude Code (or any
 Anthropic- or OpenAI-compatible agent) at it, and it sends each request to the cheapest
@@ -52,12 +53,26 @@ divided by the number of tasks that passed, set against the same tasks run with 
 request sent to Opus. Cost per session alone would reward a router that is cheap because
 it fails.
 
-| Metric | Target | Result |
-|---|---|---|
-| Cost per successful task, compared with all-Opus | TBD | TBD |
-| Task success rate, compared with all-Opus | TBD | TBD |
-| Overhead the proxy adds, `pre_upstream_us` (p99) | TBD | TBD |
-| Requests that needed a fallback retry | TBD | TBD |
+Pilot run on 2026-11-02 with [agentbench](https://github.com/rephol/agentbench#results):
+the `hard-v2` set, 10 tasks × 2 samples, Claude Code headless. The dollar figures are
+API-equivalent estimates.
+
+| Metric | Pilot result |
+|---|---|
+| Cost per successful task, compared with all-Opus | $0.204 vs $0.323 (**−37%**) |
+| Task success rate, compared with all-Opus | 18/20 vs 18/20 (95% CI 70–100% for both) |
+| Overhead the proxy adds, `pre_upstream_us` (routing on) | p50 348 µs, p99 674 µs (94 requests) |
+| Requests that needed a fallback retry | 0 of 94 |
+
+**Read with care:**
+- **Same success rate:** the only failures (one task, in every arm) look like a flaw in the
+  task itself. The run can't show that routing keeps quality, only that it didn't lose any here.
+- **Sonnet alone did better:** in the same run it cost $0.174 per success, cheaper than
+  routing, with the same success rate. On these tasks a single cheaper model was enough. See
+  the [agentbench results](https://github.com/rephol/agentbench#results) for the full
+  comparison.
+- **Model mix:** the router sent coding-edit and writing requests (71) to Sonnet and kept every
+  debugging request (23) on Opus.
 
 **`pre_upstream_us`** is the time from the request body being fully read to the upstream
 send being issued. It includes JSON parsing, classification, filtering and scoring, i.e.
@@ -184,7 +199,8 @@ Run the tests with `cargo test` (end-to-end, against a mock upstream; no API cal
 - [x] Pass-through proxy with streaming and a cost log
 - [x] Rule-based router as the baseline (filter, score, cache-aware switching, fallback)
 - [ ] Fine-tuned classifier and a comparison against the rules
-- [ ] Benchmark run and filling in the TBDs above
+- [x] Pilot benchmark run (agentbench, 2026-11-02)
+- [ ] Larger benchmark with tasks that separate model quality
 
 ## License
 
