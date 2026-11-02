@@ -6,6 +6,7 @@ pub mod models;
 pub mod pricing;
 pub mod route;
 pub mod summary;
+pub mod tokens;
 pub mod usage;
 
 use axum::{
@@ -211,7 +212,7 @@ async fn proxy(State(st): State<Arc<AppState>>, req: Request<Body>) -> Response<
     let mut plan_log: Option<route::RouteLog> = None;
     let mut candidates: Vec<Option<String>> = vec![None];
     if let (true, Some(routing), Some(v)) = (routable, st.routing.as_ref(), req_json.as_ref()) {
-        let plan = routing.plan(v, bytes.len(), &st.pricing);
+        let plan = routing.plan(v, &st.pricing);
         plan_log = Some(plan.to_log());
         if !plan.ranked.is_empty() {
             candidates = plan.ranked.iter().map(|c| Some(c.model.clone())).collect();

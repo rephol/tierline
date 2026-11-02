@@ -41,7 +41,10 @@ async fn main() {
                  TIERLINE_MODELS    default models.json\n  \
                  TIERLINE_UNHEALTHY_SECS     default 60\n  \
                  TIERLINE_LAMBDA             5 comma-separated weights, complexity 1..5\n  \
-                 TIERLINE_EST_OUTPUT_TOKENS  default 1000"
+                 TIERLINE_EST_OUTPUT_TOKENS  default 1000\n  \
+                 TIERLINE_CHARS_PER_TOKEN    default 3.5\n  \
+                 TIERLINE_IMAGE_TOKENS       default 1600\n  \
+                 TIERLINE_CONTEXT_MARGIN     default 1.15"
             );
             return;
         }
@@ -124,6 +127,25 @@ fn build_routing(pricing: &Pricing) -> Routing {
         cfg.est_output_tokens = v
             .parse()
             .unwrap_or_else(|_| die("bad TIERLINE_EST_OUTPUT_TOKENS".into()));
+    }
+    if let Ok(v) = env::var("TIERLINE_CHARS_PER_TOKEN") {
+        cfg.tokens.chars_per_token = v
+            .parse::<f64>()
+            .ok()
+            .filter(|x| x.is_finite() && *x > 0.0)
+            .unwrap_or_else(|| die("bad TIERLINE_CHARS_PER_TOKEN".into()));
+    }
+    if let Ok(v) = env::var("TIERLINE_IMAGE_TOKENS") {
+        cfg.tokens.image_tokens = v
+            .parse()
+            .unwrap_or_else(|_| die("bad TIERLINE_IMAGE_TOKENS".into()));
+    }
+    if let Ok(v) = env::var("TIERLINE_CONTEXT_MARGIN") {
+        cfg.tokens.context_margin = v
+            .parse::<f64>()
+            .ok()
+            .filter(|x| x.is_finite() && *x >= 1.0)
+            .unwrap_or_else(|| die("bad TIERLINE_CONTEXT_MARGIN (must be >= 1)".into()));
     }
     if let Ok(v) = env::var("TIERLINE_LAMBDA") {
         cfg.lambda = tierline::route::parse_lambda(&v).unwrap_or_else(|e| die(e));

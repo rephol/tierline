@@ -5,6 +5,7 @@ use crate::{
     classify::{Category, Classification, Classifier, Features, Ratings},
     models::ModelInfo,
     pricing::Pricing,
+    tokens::TokenConfig,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -26,6 +27,8 @@ pub struct RouteConfig {
     pub lambda: [f64; 5],
     /// Output tokens assumed for the cost estimate.
     pub est_output_tokens: u64,
+    /// Input-token estimate settings, including the context-window margin.
+    pub tokens: TokenConfig,
 }
 
 impl Default for RouteConfig {
@@ -34,6 +37,7 @@ impl Default for RouteConfig {
             unhealthy_for: Duration::from_secs(60),
             lambda: [8.0, 4.0, 2.0, 1.0, 0.5],
             est_output_tokens: 1000,
+            tokens: TokenConfig::default(),
         }
     }
 }
@@ -138,11 +142,6 @@ pub fn conversation_key(req: &Value) -> String {
     format!("{:016x}", fnv1a(&[&system, &first_user]))
 }
 
-/// Rough input-token estimate from the request body size (about 4 bytes per token).
-pub fn estimate_tokens(body_len: usize) -> u64 {
-    (body_len / 4) as u64
-}
-
 pub struct Routing {
     pub models: Vec<ModelInfo>,
     pub cfg: RouteConfig,
@@ -197,22 +196,26 @@ impl Routing {
                 (!f.has_images || m.images)
                     && (f.tool_count == 0 || m.tools)
                     && (!f.wants_thinking || m.thinking)
-                    && input_tokens <= m.context_window
+                    && (input_tokens as f64)
+                        <= m.context_window as f64 * self.cfg.tokens.context_margin
                     && !self.is_unhealthy(&m.id)
             })
             .collect()
     }
 
     /// Filters, scores and ranks. `ranked` is empty when no model can serve the request.
-    pub fn plan(&self, req: &Value, body_len: usize, pricing: &Pricing) -> Plan {
+    pub fn plan(&self, req: &Value, pricing: &Pricing) -> Plan {
         let f = Features::from_request(req);
         let key = conversation_key(req);
-        let input_tokens = estimate_tokens(body_len);
+        let input_tokens = self.cfg.tokens.estimate(req);
         let classification = self.classifier.classify(&f);
         let r = classification.ratings;
         let last = self.last_model(&key);
 
-        let new_tokens = ((f.last_user_text.len() + f.last_tool_result_len) / 4) as u64;
+        let new_tokens = self
+            .cfg
+            .tokens
+            .text_len(f.last_user_text.len() + f.last_tool_result_len);
         let ctx_tokens = input_tokens.saturating_sub(new_tokens);
         let lambda = self.cfg.lambda_for(r.complexity);
         let m = 1_000_000.0;
@@ -306,7 +309,7 @@ mod tests {
     }
 
     fn plan_for(r: &Routing, v: &Value) -> Plan {
-        r.plan(v, v.to_string().len(), &pricing())
+        r.plan(v, &pricing())
     }
 
     #[test]

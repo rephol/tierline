@@ -203,6 +203,7 @@ fn model(id: &str, q: f64, tools: bool) -> ModelInfo {
 }
 
 struct Rig {
+    state: Arc<AppState>,
     proxy: String,
     seen: Seen,
     log: tempfile::NamedTempFile,
@@ -227,7 +228,8 @@ async fn rig(models: Vec<ModelInfo>, routing: bool) -> Rig {
             .then(|| Routing::new(models, RouteConfig::default(), Box::new(RuleClassifier))),
     });
     Rig {
-        proxy: serve(app(state)).await,
+        proxy: serve(app(state.clone())).await,
+        state,
         seen,
         log,
     }
@@ -390,4 +392,83 @@ async fn mid_turn_tool_result_sticks_to_the_previous_model_end_to_end() {
     let rb = b.route.unwrap();
     assert!(rb.sticky);
     assert_eq!(rb.chosen_model, a.route.unwrap().chosen_model);
+}
+
+// ---- stickiness, where it actually changes the outcome ----
+//
+// m-a only one that can think, so turn 1 (thinking on) must go to m-a. m-b is the better
+// model for everything else. Turn 2 is a tool_result turn without thinking, so ranking
+// alone picks m-b; only stickiness keeps it on m-a.
+
+fn sticky_models() -> Vec<ModelInfo> {
+    vec![
+        model("m-a", 0.3, true),
+        ModelInfo {
+            thinking: false,
+            ..model("m-b", 0.9, true)
+        },
+    ]
+}
+
+fn turn1() -> serde_json::Value {
+    let mut v = hello();
+    v["thinking"] = serde_json::json!({"type":"enabled","budget_tokens":1024});
+    v
+}
+
+fn tool_result_turn() -> serde_json::Value {
+    let mut v = hello();
+    v["messages"] = serde_json::json!([
+        {"role":"user","content":"hello"},
+        {"role":"assistant","content":[{"type":"tool_use","id":"1","name":"a","input":{}}]},
+        {"role":"user","content":[{"type":"tool_result","tool_use_id":"1","content":"ok"}]}]);
+    v
+}
+
+#[tokio::test]
+async fn control_tool_result_turn_without_history_picks_the_better_model() {
+    let r = rig(sticky_models(), true).await;
+    assert_eq!(post_json(&r, "/v1/messages", tool_result_turn()).await, 200);
+    assert_eq!(*r.seen.lock().unwrap(), ["m-b"]);
+}
+
+#[tokio::test]
+async fn previous_model_wins_a_mid_turn_tool_result_over_ranking() {
+    let r = rig(sticky_models(), true).await;
+    assert_eq!(post_json(&r, "/v1/messages", turn1()).await, 200);
+    assert_eq!(post_json(&r, "/v1/messages", tool_result_turn()).await, 200);
+    assert_eq!(*r.seen.lock().unwrap(), ["m-a", "m-a"]);
+    let lines = wait_lines(r.log.path(), 2).await;
+    let rec: LogRecord = serde_json::from_str(&lines[1]).unwrap();
+    let route = rec.route.unwrap();
+    assert!(route.sticky);
+    // Ranking alone would have put m-b first.
+    assert_eq!(route.candidates[0].model, "m-a");
+    assert!(route.candidates.iter().any(|c| c.model == "m-b"));
+}
+
+#[tokio::test]
+async fn unhealthy_previous_model_falls_back_to_normal_ranking() {
+    let r = rig(sticky_models(), true).await;
+    assert_eq!(post_json(&r, "/v1/messages", turn1()).await, 200);
+    r.state.routing.as_ref().unwrap().mark_unhealthy("m-a");
+    assert_eq!(post_json(&r, "/v1/messages", tool_result_turn()).await, 200);
+    assert_eq!(*r.seen.lock().unwrap(), ["m-a", "m-b"]);
+    let lines = wait_lines(r.log.path(), 2).await;
+    let rec: LogRecord = serde_json::from_str(&lines[1]).unwrap();
+    assert!(!rec.route.unwrap().sticky);
+}
+
+#[tokio::test]
+async fn context_margin_keeps_a_slightly_over_window_model() {
+    // A ~110k-token body against a 100k window: within the 1.15 margin, so still served.
+    let r = rig(vec![model("m-a", 0.9, true)], true).await;
+    let mut v = hello();
+    v["messages"] = serde_json::json!([{"role":"user","content":"x".repeat(385_000)}]);
+    assert_eq!(post_json(&r, "/v1/messages", v.clone()).await, 200);
+    assert_eq!(*r.seen.lock().unwrap(), ["m-a"]);
+    // Far over the window: filtered, so the client's model is used untouched.
+    v["messages"] = serde_json::json!([{"role":"user","content":"x".repeat(500_000)}]);
+    assert_eq!(post_json(&r, "/v1/messages", v).await, 200);
+    assert_eq!(r.seen.lock().unwrap().last().unwrap(), "client-asked");
 }

@@ -1,5 +1,7 @@
 # tierline
 
+[![CI](https://github.com/rephol/tierline/actions/workflows/ci.yml/badge.svg)](https://github.com/rephol/tierline/actions/workflows/ci.yml)
+
 > **Status: pre-alpha, design stage.** Nothing below has been measured yet. Every
 > number is a target, not a result, and is marked **TBD** until a benchmark run backs it.
 
@@ -82,8 +84,15 @@ agent --> tierline (axum) --> filter --> classify --> score --> rank --> upstrea
 - **Fails open:** if no candidate survives filtering, or the body is not parseable, the
   request goes to the model the client asked for, untouched.
 - **Candidate filter:** `models.json` lists each model's context window, whether it
-  supports tools / images / thinking, and a 0-1 quality score per task category. Estimated
-  input tokens are `body bytes / 4`, a rough heuristic.
+  supports tools / images / thinking, and a 0-1 quality score per task category. Input tokens
+  are estimated from the parsed request, not the body size: text in the system prompt,
+  messages, `tool_use` input, `tool_result` content and tool definitions at a configurable
+  chars-per-token ratio (JSON syntax and base64 are not counted), plus a fixed cost per
+  image. It is a heuristic with no tokenizer download. The window filter drops a model
+  only when the estimate exceeds `context_window * 1.15`: the estimate can be off by tens
+  of percent, and wrongly dropping a model that could have served the request is worse
+  than keeping one that cannot (that case is not retried, since only 5xx / 529 trigger
+  a fallback, so the client sees the upstream's error for that request).
 - **Classifier:** a `Classifier` trait. The baseline is rule-based and reads mostly the
   newest turns (is the last message a tool result, length of the last user text, keywords,
   code blocks, turn count, tool count). It is a trait so a fine-tuned model can replace
@@ -144,6 +153,9 @@ Configuration is by environment variable:
 | `TIERLINE_UNHEALTHY_SECS` | `60` | how long a model that returned 5xx/529 is skipped |
 | `TIERLINE_LAMBDA` | `8,4,2,1,0.5` | cost weight for complexity 1..5; untuned placeholders |
 | `TIERLINE_EST_OUTPUT_TOKENS` | `1000` | output tokens assumed in the cost estimate |
+| `TIERLINE_CHARS_PER_TOKEN` | `3.5` | ASCII chars per token in the input estimate; non-ASCII chars count 1 token each |
+| `TIERLINE_IMAGE_TOKENS` | `1600` | tokens charged per image / binary document |
+| `TIERLINE_CONTEXT_MARGIN` | `1.15` | filter drops a model only above `context_window * margin` (>= 1) |
 
 Each log line records the model, input/output/cache-creation/cache-read tokens, cost,
 `pre_upstream_us`, time to first byte and total time. A failed upstream send is logged
