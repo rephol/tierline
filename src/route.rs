@@ -22,8 +22,8 @@ const MAX_CONVERSATIONS: usize = 10_000;
 pub struct RouteConfig {
     /// How long a model that returned 5xx/529 is skipped.
     pub unhealthy_for: Duration,
-    /// Cost weight per complexity rating 1..=5, in utility points per USD. Large for easy
-    /// requests, shrinking as complexity rises. Untuned placeholder defaults.
+    /// Per complexity rating 1..=5: the quality a full cost saving is worth (utility =
+    /// quality - lambda * cost / max candidate cost). Shrinks as complexity rises.
     pub lambda: [f64; 5],
     /// Output tokens assumed for the cost estimate.
     pub est_output_tokens: u64,
@@ -35,7 +35,7 @@ impl Default for RouteConfig {
     fn default() -> Self {
         Self {
             unhealthy_for: Duration::from_secs(60),
-            lambda: [8.0, 4.0, 2.0, 1.0, 0.5],
+            lambda: [0.30, 0.15, 0.08, 0.04, 0.02],
             est_output_tokens: 1000,
             tokens: TokenConfig::default(),
         }
@@ -48,7 +48,7 @@ impl RouteConfig {
     }
 }
 
-/// Parses `"8,4,2,1,0.5"` into a lambda curve; values must be finite and non-negative.
+/// Parses `"0.3,0.15,0.08,0.04,0.02"` into a lambda curve; values must be finite and non-negative.
 pub fn parse_lambda(s: &str) -> Result<[f64; 5], String> {
     let v: Vec<f64> = s
         .split(',')
@@ -212,15 +212,18 @@ impl Routing {
         let r = classification.ratings;
         let last = self.last_model(&key);
 
-        let new_tokens = self
-            .cfg
-            .tokens
-            .text_len(f.last_user_text.len() + f.last_tool_result_len);
+        let new_tokens = self.cfg.tokens.text_len(
+            if f.last_is_tool_result {
+                0
+            } else {
+                f.last_user_text.len()
+            } + f.last_tool_result_len,
+        );
         let ctx_tokens = input_tokens.saturating_sub(new_tokens);
         let lambda = self.cfg.lambda_for(r.complexity);
         let m = 1_000_000.0;
 
-        let mut ranked: Vec<CandidateLog> = self
+        let scored: Vec<(&ModelInfo, f64, f64, bool)> = self
             .filter(&f, input_tokens)
             .into_iter()
             .map(|model| {
@@ -243,10 +246,18 @@ impl Routing {
                     };
                     (base + switch) / m
                 });
+                (model, quality, cost, price.is_some())
+            })
+            .collect();
+        let max_cost = scored.iter().map(|c| c.2).fold(0.0, f64::max);
+        let mut ranked: Vec<CandidateLog> = scored
+            .into_iter()
+            .map(|(model, quality, cost, priced)| {
+                let penalty = if max_cost > 0.0 { cost / max_cost } else { 0.0 };
                 CandidateLog {
                     model: model.id.clone(),
-                    utility: quality - lambda * cost,
-                    priced: price.is_some(),
+                    utility: quality - lambda * penalty,
+                    priced,
                 }
             })
             .collect();
@@ -385,6 +396,40 @@ mod tests {
     }
 
     #[test]
+    fn small_quality_gap_on_easy_request_picks_the_cheap_model() {
+        // 0.03 quality gap, 10x price: a full saving is worth more than 0.03 at low complexity.
+        let r = routing(vec![
+            model("cheap", 100_000, 0.87),
+            model("pricey", 100_000, 0.90),
+        ]);
+        let p = plan_for(&r, &req("hi"));
+        assert!(p.classification.ratings.complexity <= 2);
+        assert_eq!(p.ranked[0].model, "cheap");
+    }
+
+    #[test]
+    fn hard_request_keeps_the_strong_model_despite_price() {
+        let r = routing(vec![
+            model("cheap", 100_000, 0.80),
+            model("pricey", 100_000, 0.90),
+        ]);
+        let long = "x ".repeat(2000);
+        let p = plan_for(&r, &req(&format!("fix the production auth bug {long}")));
+        assert!(p.classification.ratings.complexity >= 4);
+        assert_eq!(p.ranked[0].model, "pricey");
+    }
+
+    #[test]
+    fn all_unpriced_means_no_cost_penalty() {
+        let r = routing(vec![model("u1", 100_000, 0.5), model("u2", 100_000, 0.7)]);
+        let p = plan_for(&r, &req("hi"));
+        assert!(p.ranked.iter().all(|c| !c.priced));
+        let u2 = p.ranked.iter().find(|c| c.model == "u2").unwrap();
+        assert!(u2.utility > 0.5, "utility is plain quality: {}", u2.utility);
+        assert_eq!(p.ranked[0].model, "u2");
+    }
+
+    #[test]
     fn unknown_price_counts_as_zero_cost_and_is_flagged() {
         let r = routing(vec![
             model("mystery", 100_000, 0.5),
@@ -409,8 +454,8 @@ mod tests {
     #[test]
     fn switching_penalty_keeps_the_previous_model() {
         let r = routing(vec![
-            model("cheap", 1_000_000, 0.6),
-            model("pricey", 1_000_000, 0.9),
+            model("cheap", 1_000_000, 0.60),
+            model("pricey", 1_000_000, 0.70),
         ]);
         let big = "word ".repeat(100_000);
         let v = json!({"model":"x","system":"s","messages":[
@@ -420,11 +465,17 @@ mod tests {
         // With no cache history the much better model wins this hard, large request.
         let fresh = plan_for(&r, &v);
         assert_eq!(fresh.ranked[0].model, "pricey");
-        // Once the conversation is cached on the cheap model, a rewrite of ~125k context
-        // tokens at the cache-write price outweighs the quality gain.
+        // Once the conversation is cached on the cheap model, switching costs a rewrite of
+        // ~125k context tokens at the cache-write price, which narrows pricey's lead.
+        // (With cost normalized by the max candidate, the penalty is bounded by lambda,
+        // so it shifts utility rather than flipping a large quality gap.)
+        let margin = |p: &Plan| {
+            let u = |m: &str| p.ranked.iter().find(|c| c.model == m).unwrap().utility;
+            u("pricey") - u("cheap")
+        };
         r.remember(&fresh.conversation_key, "cheap");
         let again = plan_for(&r, &v);
-        assert_eq!(again.ranked[0].model, "cheap");
+        assert!(margin(&again) < margin(&fresh));
         assert!(!again.sticky);
     }
 

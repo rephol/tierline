@@ -179,6 +179,20 @@ fn server_failure(status: StatusCode) -> bool {
     status.is_server_error() // includes Anthropic's 529 overloaded
 }
 
+/// Debug aid: with `TIERLINE_DUMP_BODIES=<dir>`, writes every request body to that
+/// directory. Bodies contain prompts and file contents; keep the directory private.
+fn dump_body(bytes: &[u8]) {
+    static DIR: std::sync::OnceLock<Option<std::path::PathBuf>> = std::sync::OnceLock::new();
+    static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let Some(dir) = DIR.get_or_init(|| std::env::var_os("TIERLINE_DUMP_BODIES").map(Into::into))
+    else {
+        return;
+    };
+    let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let _ = std::fs::create_dir_all(dir);
+    let _ = std::fs::write(dir.join(format!("{}-{n:04}.json", now_ms())), bytes);
+}
+
 async fn proxy(State(st): State<Arc<AppState>>, req: Request<Body>) -> Response<Body> {
     let started = Instant::now();
     let (parts, body) = req.into_parts();
@@ -187,6 +201,7 @@ async fn proxy(State(st): State<Arc<AppState>>, req: Request<Body>) -> Response<
         Err(e) => return error(StatusCode::PAYLOAD_TOO_LARGE, e.to_string()),
     };
     let read_done = Instant::now();
+    dump_body(&bytes);
 
     let path = parts
         .uri

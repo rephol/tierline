@@ -121,6 +121,23 @@ fn content_len(v: &Value) -> usize {
     }
 }
 
+fn is_injected(text: &str) -> bool {
+    text.trim_start().starts_with("<system-reminder>")
+}
+
+fn user_text(content: Option<&Value>) -> String {
+    match content {
+        Some(Value::String(s)) if !is_injected(s) => s.clone(),
+        Some(Value::Array(a)) => a
+            .iter()
+            .filter_map(block_text)
+            .filter(|t| !is_injected(t))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        _ => String::new(),
+    }
+}
+
 impl Features {
     pub fn from_request(req: &Value) -> Features {
         let msgs = req
@@ -163,21 +180,15 @@ impl Features {
                 }
             }
         }
-        if let Some(m) = msgs
+        // Newest user message that carries real text. Tool-result-only messages and
+        // harness-injected `<system-reminder>` blocks are not what the user asked for.
+        f.last_user_text = msgs
             .iter()
             .rev()
-            .find(|m| m.get("role").and_then(Value::as_str) == Some("user"))
-        {
-            f.last_user_text = match m.get("content") {
-                Some(Value::String(s)) => s.clone(),
-                Some(Value::Array(a)) => a
-                    .iter()
-                    .filter_map(block_text)
-                    .collect::<Vec<_>>()
-                    .join("\n"),
-                _ => String::new(),
-            };
-        }
+            .filter(|m| m.get("role").and_then(Value::as_str) == Some("user"))
+            .map(|m| user_text(m.get("content")))
+            .find(|t| !t.trim().is_empty())
+            .unwrap_or_default();
         f
     }
 }
@@ -525,8 +536,43 @@ mod tests {
         assert!(f.last_is_tool_result && f.has_images && f.wants_thinking);
         assert_eq!(f.tool_count, 2);
         assert_eq!(f.last_tool_result_len, 2);
-        // Newest user message has only a tool_result, so no user text.
-        assert_eq!(f.last_user_text, "");
+        // The newest message is only a tool_result, so the text comes from the newest
+        // user message that has some.
+        assert_eq!(f.last_user_text, "look");
+    }
+
+    // Synthetic body shaped like Claude Code's: injected reminder blocks ahead of the
+    // real prompt, and a tool loop afterwards.
+    fn cc_body(with_tool_turn: bool) -> Value {
+        let mut msgs = vec![json!({"role":"user","content":[
+            {"type":"text","text":"<system-reminder>\nProject notes. Plan the roadmap, design the architecture, review the PR, deploy to production.\n</system-reminder>"},
+            {"type":"text","text":"<system-reminder>\nMore harness context about tests and config.\n</system-reminder>"},
+            {"type":"text","text":"hello there"}]})];
+        if with_tool_turn {
+            msgs.push(json!({"role":"assistant","content":[{"type":"tool_use","id":"1","name":"Read","input":{}}]}));
+            msgs.push(json!({"role":"user","content":[{"type":"tool_result","tool_use_id":"1","content":"ok"}]}));
+        }
+        json!({"system":"You are a coding agent. Plan carefully, design well.","messages":msgs})
+    }
+
+    #[test]
+    fn system_reminders_and_system_prompt_are_ignored() {
+        let f = Features::from_request(&cc_body(false));
+        assert_eq!(f.last_user_text, "hello there");
+        let c = RuleClassifier.classify(&f);
+        assert!(
+            c.prob(Category::Planning) < 0.15,
+            "planning {}",
+            c.prob(Category::Planning)
+        );
+        assert!(c.ratings.complexity <= 2);
+    }
+
+    #[test]
+    fn tool_loop_turns_still_see_the_real_prompt_not_reminders() {
+        let f = Features::from_request(&cc_body(true));
+        assert!(f.last_is_tool_result);
+        assert_eq!(f.last_user_text, "hello there");
     }
 
     #[test]

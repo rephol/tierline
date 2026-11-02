@@ -99,8 +99,13 @@ agent --> tierline (axum) --> filter --> classify --> score --> rank --> upstrea
   it later; the rules are the baseline that model must beat.
 - **Scoring:** `expected_quality = sum(category_prob * model.quality[category])`, sharpened
   by complexity (low-quality models lose more as complexity rises).
-  `utility = expected_quality - lambda(complexity) * (estimated cost + switch penalty)`.
-  `lambda` is large for easy requests and shrinks as complexity rises; the curve is
+  `utility = expected_quality - lambda(complexity) * (candidate cost / max candidate cost)`,
+  where candidate cost includes the cache-switch penalty; with no priced candidate the penalty is 0.
+  `lambda` is the quality you would give up for a full saving: 0.30 at complexity 1, then
+  0.15, 0.08, 0.04, 0.02. Reasoning: on a trivial request nearly any model is right, so
+  trading up to 0.3 quality points for the cheapest option is fine; on a hard one a 2-point
+  quality loss is the most a full saving should buy. Chosen from first principles, not fitted to
+  benchmark results; the curve is
   configurable.
 - **Cache-aware switching:** a conversation key (hash of the system prompt and first user
   message) remembers the last model used. Switching adds a penalty proportional to the
@@ -151,7 +156,8 @@ Configuration is by environment variable:
 | `TIERLINE_ROUTE` | off | `1` turns routing on (needs `models.json`) |
 | `TIERLINE_MODELS` | `models.json` | candidates: context window, capabilities, quality per category |
 | `TIERLINE_UNHEALTHY_SECS` | `60` | how long a model that returned 5xx/529 is skipped |
-| `TIERLINE_LAMBDA` | `8,4,2,1,0.5` | cost weight for complexity 1..5; untuned placeholders |
+| `TIERLINE_LAMBDA` | `0.3,0.15,0.08,0.04,0.02` | quality given up for a full saving, complexity 1..5; untuned |
+| `TIERLINE_DUMP_BODIES` | off | debug: directory to write every request body to (contains prompts; keep private) |
 | `TIERLINE_EST_OUTPUT_TOKENS` | `1000` | output tokens assumed in the cost estimate |
 | `TIERLINE_CHARS_PER_TOKEN` | `3.5` | ASCII chars per token in the input estimate; non-ASCII chars count 1 token each |
 | `TIERLINE_IMAGE_TOKENS` | `1600` | tokens charged per image / binary document |
