@@ -101,6 +101,9 @@ pub struct Features {
     pub tool_count: usize,
     pub has_images: bool,
     pub wants_thinking: bool,
+    /// Explicit budgeted thinking (`type: "enabled"`); `adaptive` is sent by default by
+    /// Claude Code on every request, so it is no signal about difficulty.
+    pub thinking_budgeted: bool,
 }
 
 fn block_text(b: &Value) -> Option<&str> {
@@ -156,6 +159,11 @@ impl Features {
                 .and_then(|t| t.get("type"))
                 .and_then(Value::as_str)
                 .is_some_and(|t| t != "disabled"),
+            thinking_budgeted: req
+                .get("thinking")
+                .and_then(|t| t.get("type"))
+                .and_then(Value::as_str)
+                == Some("enabled"),
             ..Default::default()
         };
         let blocks = |m: &Value| -> Vec<Value> {
@@ -409,7 +417,7 @@ impl Classifier for RuleClassifier {
         if f.tool_count > 15 && !f.last_is_tool_result {
             complexity += 1;
         }
-        if f.wants_thinking {
+        if f.thinking_budgeted {
             complexity += 1;
         }
         if f.last_is_tool_result && f.last_tool_result_len < 2000 {
@@ -553,6 +561,22 @@ mod tests {
             msgs.push(json!({"role":"user","content":[{"type":"tool_result","tool_use_id":"1","content":"ok"}]}));
         }
         json!({"system":"You are a coding agent. Plan carefully, design well.","messages":msgs})
+    }
+
+    #[test]
+    fn only_budgeted_thinking_raises_complexity() {
+        let cx = |t: Value| {
+            let f = Features::from_request(&json!({"thinking":t,
+                "messages":[{"role":"user","content":"hello there"}]}));
+            RuleClassifier.classify(&f).ratings.complexity
+        };
+        let adaptive = cx(json!({"type":"adaptive"}));
+        let disabled = cx(json!({"type":"disabled"}));
+        let enabled = cx(json!({"type":"enabled","budget_tokens":1000}));
+        assert_eq!(adaptive, disabled);
+        assert_eq!(enabled, adaptive + 1);
+        let f = Features::from_request(&json!({"thinking":{"type":"adaptive"},"messages":[]}));
+        assert!(f.wants_thinking && !f.thinking_budgeted);
     }
 
     #[test]
