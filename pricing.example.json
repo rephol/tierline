@@ -1,0 +1,6 @@
+{
+  "_comment": "USD per million tokens. Copy to pricing.json and fill in from https://www.anthropic.com/pricing. Keys match by model-name prefix; the longest match wins.",
+  "claude-haiku": { "input": 0, "output": 0, "cache_write": 0, "cache_read": 0 },
+  "claude-sonnet": { "input": 0, "output": 0, "cache_write": 0, "cache_read": 0 },
+  "claude-opus": { "input": 0, "output": 0, "cache_write": 0, "cache_read": 0 }
+}

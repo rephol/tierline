@@ -1,0 +1,173 @@
+# tierline
+
+> **Status: pre-alpha, design stage.** Nothing below has been measured yet. Every
+> number is a target, not a result, and is marked **TBD** until a benchmark run backs it.
+
+A model-routing proxy for coding agents, written in Rust. Point Claude Code (or any
+Anthropic- or OpenAI-compatible agent) at it, and it sends each request to the cheapest
+model tier likely to handle it: Haiku, Sonnet or Opus.
+
+```bash
+export ANTHROPIC_BASE_URL=http://localhost:8787
+claude   # unchanged workflow; tierline picks the model per request
+```
+
+## The problem
+
+A coding agent sends every turn to one model. Many turns don't need the strongest one,
+for example reading a file, running `ls`, a one-line edit or summarizing tool output.
+Paying top-tier prices for those wastes money, but downgrading blindly breaks the hard
+turns.
+
+## What it does
+
+1. **Intercepts** each `POST /v1/messages` request, streaming included.
+2. **Filters** the candidate models down to ones that can serve it: enough context window,
+   tool / image / thinking support, and not recently failing (5xx / 529).
+3. **Classifies** the newest turns into task-category probabilities plus 1-5 ratings for
+   complexity, ambiguity, stakes and context-dependence.
+4. **Scores** every remaining candidate: expected quality for that mix of tasks, minus a
+   cost penalty that matters a lot for easy requests and little for hard ones, minus a
+   penalty for switching models mid-conversation (it throws away the prompt cache).
+5. **Routes** to the best-scoring model, rewriting the `model` field. If that model
+   fails with a 5xx / 529 before any bytes are streamed, it retries the next-ranked
+   candidate once and marks the failed one unhealthy for a while.
+6. **Records** cost, latency and the routing decision of every request.
+
+Routing is opt-in (`TIERLINE_ROUTE=1`); without it the proxy is a pure pass-through.
+
+## Inspiration
+
+The design is a reimplementation, not a fork, of the method described in Cloudflare's
+post [Auto Router](https://blog.cloudflare.com/auto-router/): classify the request, filter
+the candidate models, score them and pick. The code here is written from scratch for
+coding agents on the Anthropic API, and adds cache-aware switching and fallback.
+
+## The metrics (how this will be judged)
+
+The headline metric is **cost per successful task**: total spend on a fixed task set
+divided by the number of tasks that passed, set against the same tasks run with every
+request sent to Opus. Cost per session alone would reward a router that is cheap because
+it fails.
+
+| Metric | Target | Result |
+|---|---|---|
+| Cost per successful task, compared with all-Opus | TBD | TBD |
+| Task success rate, compared with all-Opus | TBD | TBD |
+| Overhead the proxy adds, `pre_upstream_us` (p99) | TBD | TBD |
+| Requests that needed a fallback retry | TBD | TBD |
+
+**`pre_upstream_us`** is the time from the request body being fully read to the upstream
+send being issued. It includes JSON parsing, classification, filtering and scoring, i.e.
+everything the proxy adds before the model starts working. It excludes reading the body
+from the client and everything after the send (time to first byte, streaming).
+
+**How it's measured:** a separate benchmark repo runs a fixed task set headless
+(`claude -p`) through the proxy and directly against the API, on the same tasks and repo
+snapshots, and reports cost per successful task and success rate. The numbers are
+reproduced there, not in this repo. No result has been measured yet.
+
+## Design
+
+```
+agent --> tierline (axum) --> filter --> classify --> score --> rank --> upstream API
+              |                                          ^                 |
+              |                  health + last-model per conversation      |
+              +-- JSONL log (conversation, categories, ratings, utilities) <-- retry next
+                                                                     on 5xx / 529
+```
+
+- **Rust (axum + tokio + reqwest)** keeps the proxy's own overhead low enough not to matter.
+- **Streaming pass-through:** SSE is forwarded chunk by chunk and never buffered.
+- **Fails open:** if no candidate survives filtering, or the body is not parseable, the
+  request goes to the model the client asked for, untouched.
+- **Candidate filter:** `models.json` lists each model's context window, whether it
+  supports tools / images / thinking, and a 0-1 quality score per task category. Estimated
+  input tokens are `body bytes / 4`, a rough heuristic.
+- **Classifier:** a `Classifier` trait. The baseline is rule-based and reads mostly the
+  newest turns (is the last message a tool result, length of the last user text, keywords,
+  code blocks, turn count, tool count). It is a trait so a fine-tuned model can replace
+  it later; the rules are the baseline that model must beat.
+- **Scoring:** `expected_quality = sum(category_prob * model.quality[category])`, sharpened
+  by complexity (low-quality models lose more as complexity rises).
+  `utility = expected_quality - lambda(complexity) * (estimated cost + switch penalty)`.
+  `lambda` is large for easy requests and shrinks as complexity rises; the curve is
+  configurable.
+- **Cache-aware switching:** a conversation key (hash of the system prompt and first user
+  message) remembers the last model used. Switching adds a penalty proportional to the
+  tokens already in context, priced at the cache-write minus cache-read difference. If the
+  last message is a tool result (mid-turn), the previous model is kept unless it was
+  filtered out.
+- **Fallback:** the scoring produces a ranked list. A 5xx / 529 (or a failed send) before
+  any response bytes are streamed retries the next candidate once and marks the failed
+  model unhealthy for `TIERLINE_UNHEALTHY_SECS`.
+
+## Trade-offs (to be written up as they're decided)
+
+- A rule-based classifier is cheap and inspectable but crude. How much does a trained one add?
+- Prompt caching is per model, so switching loses cache hits. The switch penalty prices
+  this in; whether the price is right is an empirical question for the benchmark.
+- The quality scores in `models.json` are user-supplied, not measured. Routing is only as
+  good as those numbers, and calibrating them from benchmark results is the intended loop.
+- The `lambda` curve and the complexity sharpening are untuned defaults.
+- Only requests whose models appear in `models.json` are ever chosen; unknown prices count
+  as zero cost, which biases toward unpriced models (a warning is logged).
+
+## Running it
+
+The proxy, cost log and a rule-based router exist. Routing is off unless you opt in, and
+you supply the model list and prices yourself; no model ids, prices or quality scores are built in.
+
+```bash
+cp pricing.example.json pricing.json   # then fill in prices (USD per million tokens)
+cp models.example.json models.json     # only for routing; replace every placeholder
+cargo run --release                    # listens on 127.0.0.1:8787
+```
+
+In another shell:
+
+```bash
+export ANTHROPIC_BASE_URL=http://127.0.0.1:8787
+claude
+```
+
+Configuration is by environment variable:
+
+| Variable | Default | |
+|---|---|---|
+| `TIERLINE_LISTEN` | `127.0.0.1:8787` | address to bind |
+| `TIERLINE_UPSTREAM` | `https://api.anthropic.com` | upstream API base URL |
+| `TIERLINE_LOG` | `tierline.jsonl` | JSONL cost log, one line per request |
+| `TIERLINE_PRICING` | `pricing.json` | optional; `cost_usd` is null without it |
+| `TIERLINE_ROUTE` | off | `1` turns routing on (needs `models.json`) |
+| `TIERLINE_MODELS` | `models.json` | candidates: context window, capabilities, quality per category |
+| `TIERLINE_UNHEALTHY_SECS` | `60` | how long a model that returned 5xx/529 is skipped |
+| `TIERLINE_LAMBDA` | `8,4,2,1,0.5` | cost weight for complexity 1..5; untuned placeholders |
+| `TIERLINE_EST_OUTPUT_TOKENS` | `1000` | output tokens assumed in the cost estimate |
+
+Each log line records the model, input/output/cache-creation/cache-read tokens, cost,
+`pre_upstream_us`, time to first byte and total time. A failed upstream send is logged
+with status 502 and an `error` field. With routing on, a line also carries the
+conversation key, the top predicted categories, the four 1-5 ratings, the chosen model,
+every candidate's utility (and whether it had a price) and, after a retry, `fallback_from`.
+A model missing from `pricing.json` is costed at 0 when scoring and flagged `priced: false`.
+Records are written by a single background task, never on the request path.
+
+Summarize a log (totals per model and per conversation key) with:
+
+```bash
+cargo run --release -- summary [tierline.jsonl]
+```
+
+Run the tests with `cargo test` (end-to-end, against a mock upstream; no API calls).
+
+## Roadmap
+
+- [x] Pass-through proxy with streaming and a cost log
+- [x] Rule-based router as the baseline (filter, score, cache-aware switching, fallback)
+- [ ] Fine-tuned classifier and a comparison against the rules
+- [ ] Benchmark run and filling in the TBDs above
+
+## License
+
+MIT

@@ -1,0 +1,41 @@
+{
+  "_comment": "PLACEHOLDERS ONLY. Copy to models.json and replace every id, context window, capability and quality score with real values. Quality is 0-1 per task category and is yours to measure or estimate; none of these numbers are real.",
+  "models": [
+    {
+      "id": "claude-haiku-REPLACE-ME",
+      "context_window": 0,
+      "tools": true,
+      "images": true,
+      "thinking": false,
+      "quality": {
+        "coding_edit": 0.0, "coding_explore": 0.0, "planning": 0.0, "debugging": 0.0,
+        "refactoring": 0.0, "testing": 0.0, "code_review": 0.0, "research": 0.0,
+        "writing": 0.0, "data_analysis": 0.0, "devops": 0.0, "chitchat_tool_plumbing": 0.0
+      }
+    },
+    {
+      "id": "claude-sonnet-REPLACE-ME",
+      "context_window": 0,
+      "tools": true,
+      "images": true,
+      "thinking": true,
+      "quality": {
+        "coding_edit": 0.0, "coding_explore": 0.0, "planning": 0.0, "debugging": 0.0,
+        "refactoring": 0.0, "testing": 0.0, "code_review": 0.0, "research": 0.0,
+        "writing": 0.0, "data_analysis": 0.0, "devops": 0.0, "chitchat_tool_plumbing": 0.0
+      }
+    },
+    {
+      "id": "claude-opus-REPLACE-ME",
+      "context_window": 0,
+      "tools": true,
+      "images": true,
+      "thinking": true,
+      "quality": {
+        "coding_edit": 0.0, "coding_explore": 0.0, "planning": 0.0, "debugging": 0.0,
+        "refactoring": 0.0, "testing": 0.0, "code_review": 0.0, "research": 0.0,
+        "writing": 0.0, "data_analysis": 0.0, "devops": 0.0, "chitchat_tool_plumbing": 0.0
+      }
+    }
+  ]
+}
