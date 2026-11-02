@@ -55,7 +55,8 @@ it fails.
 
 Pilot run on 2026-11-02 with [agentbench](https://github.com/rephol/agentbench#results):
 the `hard-v2` set, 10 tasks × 2 samples, Claude Code headless. The dollar figures are
-API-equivalent estimates.
+API-equivalent estimates. All arms ran at **low effort**, inherited from local Claude Code
+settings rather than pinned, so results at higher effort may differ.
 
 | Metric | Pilot result |
 |---|---|
