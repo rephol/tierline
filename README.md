@@ -2,9 +2,8 @@
 
 [![CI](https://github.com/rephol/tierline/actions/workflows/ci.yml/badge.svg)](https://github.com/rephol/tierline/actions/workflows/ci.yml)
 
-> **Status: pre-alpha.** One small pilot benchmark has been run (see [Metrics](#the-metrics-how-this-will-be-judged)).
-> Its numbers come from 20 attempts per arm on self-written tasks. Treat them as early
-> signal, not proof.
+> **Status: pre-alpha.** Two small benchmark runs exist (see [Metrics](#the-metrics-how-this-will-be-judged)).
+> Both are 20 attempts per arm on self-written tasks. Treat them as early signal, not proof.
 
 A model-routing proxy for coding agents, written in Rust. Point Claude Code (or any
 Anthropic- or OpenAI-compatible agent) at it, and it sends each request to the cheapest
@@ -53,27 +52,40 @@ divided by the number of tasks that passed, set against the same tasks run with 
 request sent to Opus. Cost per session alone would reward a router that is cheap because
 it fails.
 
-Pilot run on 2026-11-02 with [agentbench](https://github.com/rephol/agentbench#results):
-the `hard-v2` set, 10 tasks × 2 samples, Claude Code headless. The dollar figures are
-API-equivalent estimates. All arms ran at **low effort**, inherited from local Claude Code
-settings rather than pinned, so results at higher effort may differ.
+Main result: a clean run on 2026-11-03 with [agentbench](https://github.com/rephol/agentbench#results)
+(method, config and caveats are there): the `hard-v2` set, 10 tasks × 2 samples, Claude Code
+headless on a subscription, no user hooks/plugins/MCP, effort `medium`. Dollar figures are
+API-equivalent estimates from tierline's own log.
 
-| Metric | Pilot result |
-|---|---|
-| Cost per successful task, compared with all-Opus | $0.204 vs $0.323 (**−37%**) |
-| Task success rate, compared with all-Opus | 18/20 vs 18/20 (95% CI 70–100% for both) |
-| Overhead the proxy adds, `pre_upstream_us` (routing on) | p50 348 µs, p99 674 µs (94 requests) |
-| Requests that needed a fallback retry | 0 of 94 |
+| Arm | Passed | Est. cost | Cost per success |
+|---|---|---|---|
+| all Opus | 15/20, 75% (95% CI 50–100%) | $4.44 | $0.296 |
+| tierline routing | 18/20, 90% (CI 70–100%) | $2.09 | $0.116 (**−61%** vs Opus) |
+| Sonnet alone | 17/20, 85% (CI 65–100%) | $1.55 | $0.091 |
+
+Proxy overhead (`pre_upstream_us`, routing on, 96 requests): p50 484 µs, max 1195 µs. No
+request needed a fallback retry.
+
+The router sent 34 requests to Opus, 29 to Sonnet and 33 to Haiku, so Haiku now gets about a
+third of the requests.
 
 **Read with care:**
-- **Same success rate:** the only failures (one task, in every arm) look like a flaw in the
-  task itself. The run can't show that routing keeps quality, only that it didn't lose any here.
-- **Sonnet alone did better:** in the same run it cost $0.174 per success, cheaper than
-  routing, with the same success rate. On these tasks a single cheaper model was enough. See
-  the [agentbench results](https://github.com/rephol/agentbench#results) for the full
-  comparison.
-- **Model mix:** the router sent coding-edit and writing requests (71) to Sonnet and kept every
-  debugging request (23) on Opus.
+- **Quality can't be ranked.** Every confidence interval overlaps; Opus scoring lowest is
+  likely noise. The run shows routing did not lose quality here, not that it improves it.
+  It does not show that routing beats Opus.
+- **Sonnet alone was cheapest** at a similar pass rate. On these tasks a single cheaper
+  model was enough.
+- **Task 16 used the old prompt.** It failed in every arm in both runs because its check
+  required exact error positions the prompt never specified. It is fixed in agentbench now,
+  but these results predate the fix.
+- **Cost source:** Claude Code's self-reported cost prices every routed request as Opus
+  (it reports the model it requested), so tierline's log is the cost source for the routed arm.
+- **No advisor arm:** `--advisor opus` exists, but Claude never called it unprompted.
+
+Earlier pilot (2026-11-02, low effort inherited from local settings, user hooks active):
+$0.204 vs $0.323 per success (−37%), 18/20 for both, Haiku never chosen. The hooks added
+about 69 KB per request against about 3 KB clean, which inflated cost and is why the clean run
+replaced it.
 
 **`pre_upstream_us`** is the time from the request body being fully read to the upstream
 send being issued. It includes JSON parsing, classification, filtering and scoring, i.e.
@@ -83,7 +95,7 @@ from the client and everything after the send (time to first byte, streaming).
 **How it's measured:** a separate benchmark repo runs a fixed task set headless
 (`claude -p`) through the proxy and directly against the API, on the same tasks and repo
 snapshots, and reports cost per successful task and success rate. The numbers are
-reproduced there, not in this repo. No result has been measured yet.
+reproduced there, not in this repo.
 
 ## Design
 
@@ -200,7 +212,7 @@ Run the tests with `cargo test` (end-to-end, against a mock upstream; no API cal
 - [x] Pass-through proxy with streaming and a cost log
 - [x] Rule-based router as the baseline (filter, score, cache-aware switching, fallback)
 - [ ] Fine-tuned classifier and a comparison against the rules
-- [x] Pilot benchmark run (agentbench, 2026-11-02)
+- [x] Pilot benchmark run (agentbench, 2026-11-02) and clean run (2026-11-03)
 - [ ] Larger benchmark with tasks that separate model quality
 
 ## License
